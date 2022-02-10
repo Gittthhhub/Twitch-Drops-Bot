@@ -9,6 +9,13 @@ import {errors, Browser} from "puppeteer";
 
 const {TimeoutError} = errors;
 const prompt = require("prompt");
+const tunnel = require('tunnel');
+const tunnelProxy = tunnel.httpsOverHttp({
+    proxy: {
+        host: '127.0.0.1',
+        port: '1050',
+    },
+});
 
 import logger from "./logger";
 import utils from "./utils";
@@ -112,7 +119,8 @@ export class Client {
                     "Content-Type": "text/plain;charset=UTF-8",
                     "Client-Id": this.#clientId,
                     "Authorization": `OAuth ${this.#oauthToken}`
-                }
+                },
+                httpsAgent: tunnelProxy,
             }
         );
 
