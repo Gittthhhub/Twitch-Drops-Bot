@@ -1,4 +1,4 @@
-'use strict';
+"use strict";
 
 import fs from 'fs';
 import path from 'path';
@@ -6,10 +6,11 @@ import path from 'path';
 import axios from "axios";
 
 import logger from './logger';
-import twitch from './twitch';
+import {Client} from './twitch';
 import {StringOption, BooleanOption, IntegerOption, StringListOption} from './options';
 import {TwitchDropsBot} from './twitch_drops_bot';
 import {ConfigurationParser} from './configuration_parser';
+import {LoginPage} from "./pages/login";
 
 // Using puppeteer-extra to add plugins
 import puppeteer from 'puppeteer-extra';
@@ -41,6 +42,10 @@ function areCookiesValid(cookies: any) {
         }
     }
     return isOauthTokenFound;
+}
+
+function isInsideDocker(): boolean {
+    return fs.existsSync("/.dockerenv");
 }
 
 // Options defined here can be configured in either the config file or as command-line arguments
@@ -105,18 +110,59 @@ if (config['log_level']) {
 
 logger.debug(`git commit hash: ${process.env.GIT_COMMIT_HASH}`);
 
-// Add required browser args
-const requiredBrowserArgs = [
+// Add default browser args
+const defaultBrowserArgs = [
     '--mute-audio',
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',
     '--window-size=1920,1080'
 ];
-for (const arg of requiredBrowserArgs) {
-    if (!config['browser_args'].includes(arg)) {
+
+function getArgNames(args: string[]) {
+    const names: string[] = [];
+    for (const arg of args) {
+        names.push(arg.split("=")[0]);
+    }
+    return names;
+}
+
+const argNames = getArgNames(config["browser_args"]);
+for (const arg of defaultBrowserArgs) {
+    const argName = arg.split("=")[0];
+    if (!argNames.includes(argName)) {
         config['browser_args'].push(arg);
     }
+}
+
+// Check if we are running inside a Docker container
+if (isInsideDocker()){
+
+    const requiredBrowser = "chromium";
+    const actualBrowser = config["browser"];
+    if (actualBrowser !== requiredBrowser) {
+        logger.warn("Overriding browser option because we are inside a docker container!");
+        config["browser"] = requiredBrowser;
+    }
+
+    const requiredHeadlessLogin = true;
+    const actualHeadlessLogin = config["headless_login"];
+    if (actualHeadlessLogin !== requiredHeadlessLogin){
+        logger.warn("Overriding headless_login option because we are inside a docker container!");
+        config["headless_login"] = requiredHeadlessLogin;
+    }
+
+    const requiredBrowserArgs = ["--no-sandbox"]
+    const actualBrowserArgs = config["browser_args"];
+    const actualBrowserArgsNames = getArgNames(actualBrowserArgs);
+    for (const arg of requiredBrowserArgs) {
+        const argName = arg.split("=")[0];
+        if (!actualBrowserArgsNames.includes(argName)) {
+            logger.warn("Adding browser option: " + arg +" because we are inside a docker container!");
+            config["browser_args"].push(arg);
+        }
+    }
+
 }
 
 // Make username lowercase
@@ -225,7 +271,8 @@ async function checkVersion() {
             });
         }
 
-        cookies = await twitch.login(loginBrowser, config['username'], config['password'], config['headless_login'], config['load_timeout_secs']);
+        const loginPage = new LoginPage(await loginBrowser.newPage());
+        cookies = await loginPage.login(config['username'], config['password'], config['headless_login'], config['load_timeout_secs']);
         await page.setCookie(...cookies);
 
         if (needNewBrowser) {
@@ -267,7 +314,7 @@ async function checkVersion() {
 
     // Seems to be the default hard-coded client ID
     // Found in sources / static.twitchcdn.net / assets / minimal-cc607a041bc4ae8d6723.js
-    const twitchClient = new twitch.Client('kimne78kx3ncx6brgo4mv6wki5h1ko', oauthToken, channelLogin);
+    const twitchClient = new Client('kimne78kx3ncx6brgo4mv6wki5h1ko', oauthToken, channelLogin);
 
     const bot = new TwitchDropsBot(page, twitchClient, {
         gameIds: config['games'],

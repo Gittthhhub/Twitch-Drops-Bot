@@ -5,6 +5,12 @@ import EventEmitter from 'events';
 import logger from './logger';
 import {CDPSession, Page} from "puppeteer";
 
+export interface UserDropEvents_DropProgress {
+    drop_id: string,
+    current_progress_min: number,
+    required_progress_min: number
+}
+
 class WebSocketListener extends EventEmitter {
 
     #cdp?: CDPSession;
@@ -13,7 +19,7 @@ class WebSocketListener extends EventEmitter {
         return true;
     }
 
-    #topicHandlers: {[key: string] : (message: any) => boolean} = {
+    #topicHandlers: { [key: string]: (message: any) => boolean } = {
         'user-drop-events': message => {
             const messageType = message['type'];
             switch (messageType) {
@@ -59,6 +65,7 @@ class WebSocketListener extends EventEmitter {
                 case 'points-earned':
                 case 'reward-redeemed':
                 case 'claim-claimed':
+                case "active-multipliers-updated":
                     return true;
             }
             return false;
@@ -81,7 +88,9 @@ class WebSocketListener extends EventEmitter {
         'channel-bounty-board-events.cta': this.#ignoreTopicHandler,
         'crowd-chant-channel-v1': this.#ignoreTopicHandler,
         'radio-events-v1': this.#ignoreTopicHandler,
-        'stream-change-v1': this.#ignoreTopicHandler
+        'stream-change-v1': this.#ignoreTopicHandler,
+        'user-subscribe-events-v1': this.#ignoreTopicHandler,
+        'onsite-notifications-v1': this.#ignoreTopicHandler,
     };
 
     async attach(page: Page) {
@@ -117,6 +126,8 @@ class WebSocketListener extends EventEmitter {
                      */
                     const topic = payload['data']['topic'].split('.')[0];
                     const message = JSON.parse(payload['data']['message']);
+
+                    this.emit('message', message);
 
                     // Call topic handler
                     const topicHandler = this.#topicHandlers[topic];
