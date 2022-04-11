@@ -31,7 +31,7 @@
     "sorted-array-type": "^1.2.1",
     "tunnel": "^0.0.6",
     "wait-notify": "^1.0.3",
-    "winston": "^3.3.3"
+    "winston": "^3.7.2"
   },
   "devDependencies": {
     "rimraf": "^3.0.2",
