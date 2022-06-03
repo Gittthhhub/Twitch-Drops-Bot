@@ -1,9 +1,12 @@
 "use strict";
 
-require("dnscache")({enable: true});
+// @ts-ignore
+import dnscache from "dnscache";
+dnscache({enable: true});
 
 import axios from "axios";
 
+import logger from "./logger.js";
 const tunnel = require('tunnel');
 const tunnelProxy = tunnel.httpsOverHttp({
     proxy: {
@@ -31,7 +34,9 @@ I could make a separate interface for each API call but that would get messy ver
 
 export interface Game {
     id: string,
-    displayName: string
+    displayName: string,
+    name: string,
+    boxArtURL: string
 }
 
 export interface DropCampaign {
@@ -41,6 +46,7 @@ export interface DropCampaign {
     self: {
         isAccountConnected: boolean
     },
+    startAt: string,
     endAt: string,
     name: string,
     timeBasedDrops: TimeBasedDrop[],
@@ -59,7 +65,8 @@ export interface TimeBasedDrop {
     benefitEdges: {
         benefit: {
             id: string,
-            name: string
+            name: string,
+            game: Game
         }
     }[],
     startAt: string,
@@ -413,17 +420,31 @@ export function isDropCompleted(drop: TimeBasedDrop, inventory: Inventory): bool
     if (dropCampaignsInProgress != null) {
         for (const campaign of dropCampaignsInProgress) {
             //todo: consider event based drops!
-            for (const d of campaign.timeBasedDrops) {
-                if (d.id === drop.id) {
-                    if (d.self.isClaimed) {
-                        return true;
+            const timeBasedDrops = campaign.timeBasedDrops;
+            if (timeBasedDrops) {
+                for (const d of campaign.timeBasedDrops) {
+                    if (d.id === drop.id) {
+                        if (d.self.isClaimed) {
+                            return true;
+                        }
+                        return Date.now() > Date.parse(d.endAt);
                     }
-                    return Date.now() > Date.parse(d.endAt);
                 }
             }
         }
     }
     return false;
+}
+
+export function getDropBenefitNames(drop: TimeBasedDrop): string {
+    let result = "";
+    for (let i = 0; i < drop.benefitEdges.length; ++i) {
+        result += drop.benefitEdges[i].benefit.name;
+        if (i < drop.benefitEdges.length - 1) {
+            result += ", ";
+        }
+    }
+    return result;
 }
 
 /**

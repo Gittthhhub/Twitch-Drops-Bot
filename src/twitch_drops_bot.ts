@@ -1,21 +1,26 @@
-const SortedArray = require("sorted-array-type");
-const WaitNotify = require("wait-notify");
-const cliProgress = require("cli-progress");
-const {BarFormat} = cliProgress.Format;
-const TimeoutError = require("puppeteer").errors.TimeoutError;
-import {ElementHandle, Page} from "puppeteer";
-import {detailedDiff} from "deep-object-diff";
+import EventEmitter from "events";
 
-import Component from "./components/component";
-import DropProgressComponent from "./components/drop_progress";
-import CommunityPointsComponent from "./components/community_points";
-import WebSocketListener from "./web_socket_listener";
-import {TwitchDropsWatchdog} from "./watchdog";
-import {StreamPage} from "./pages/stream";
-import utils, {TimedSet} from './utils';
-import logger from "./logger";
-import {Client, TimeBasedDrop, DropCampaign, StreamTag, getInventoryDrop, Tag, Inventory, isDropCompleted} from "./twitch";
-import {NoStreamsError, NoProgressError, HighPriorityError, StreamLoadFailedError, StreamDownError} from "./errors";
+import _ from "lodash";
+// @ts-ignore
+import SortedArray from "sorted-array-type";
+// @ts-ignore
+import WaitNotify from "wait-notify";
+import puppeteer, {Browser} from "puppeteer";
+const {errors} = puppeteer;
+
+const TimeoutError = errors.TimeoutError;
+import {ElementHandle, Page} from "puppeteer";
+
+import Component from "./components/component.js";
+import DropProgressComponent from "./components/drop_progress.js";
+import CommunityPointsComponent from "./components/community_points.js";
+import WebSocketListener from "./web_socket_listener.js";
+import {TwitchDropsWatchdog} from "./watchdog.js";
+import {StreamPage} from "./pages/stream.js";
+import utils, {TimedSet} from './utils.js';
+import logger from "./logger.js";
+import {Client, TimeBasedDrop, DropCampaign, StreamTag, getInventoryDrop, Tag, Inventory, isDropCompleted} from "./twitch.js";
+import {NoStreamsError, NoProgressError, HighPriorityError, StreamLoadFailedError, StreamDownError} from "./errors.js";
 
 type Class<T> = { new(...args: any[]): T };
 
@@ -24,25 +29,14 @@ type Class<T> = { new(...args: any[]): T };
  * @param drop
  */
 function isDropReadyToClaim(drop: TimeBasedDrop): boolean {
-    if (!drop.self.isClaimed) {
-        return drop.self.currentMinutesWatched >= drop.requiredMinutesWatched;
+    if (drop.self.isClaimed) {
+        return false;
     }
-    return false;
-}
-
-export function getDropName(drop: TimeBasedDrop): string {
-    let dropName = "";
-    for (let i = 0; i < drop.benefitEdges.length; ++i) {
-        if (i > 0) {
-            dropName += ", ";
-        }
-        dropName += drop.benefitEdges[i].benefit.name;
+    if (!drop.self.dropInstanceID) {
+        logger.debug('drop instance id is null!');
+        return false;
     }
-    return dropName;
-}
-
-function ansiEscape(code: string): string {
-    return '\x1B[' + code;
+    return drop.self.currentMinutesWatched >= drop.requiredMinutesWatched;
 }
 
 function hasDropsEnabledTag(tags: Tag[]): boolean {
@@ -62,6 +56,82 @@ function getBroadcasterIdFromUrl(streamUrl: string): string {
     return streamUrl.split("twitch.tv/")[1];
 }
 
+export class Database {
+
+    readonly #dropCampaigns: Map<string, DropCampaign> = new Map<string, DropCampaign>();
+    readonly #drops: Map<string, TimeBasedDrop> = new Map<string, TimeBasedDrop>();
+
+    addOrUpdateDropCampaign(campaign: DropCampaign) {
+        const existingCampaign = this.#dropCampaigns.get(campaign.id);
+        if (existingCampaign) {
+            _.merge(existingCampaign, campaign);
+        } else {
+            this.#dropCampaigns.set(campaign.id, campaign);
+        }
+        const timeBasedDrops = campaign.timeBasedDrops;
+        if (timeBasedDrops) {
+            for (const drop of timeBasedDrops) {
+                this.addOrUpdateDrop(drop);
+            }
+        }
+    }
+
+    addOrUpdateDrop(drop: TimeBasedDrop) {
+        const existingDrop = this.#drops.get(drop.id);
+        if (existingDrop) {
+            _.merge(existingDrop, drop);
+        } else {
+            this.#drops.set(drop.id, drop);
+        }
+    }
+
+    getDropCampaignById(id: string): DropCampaign | null {
+        return this.#dropCampaigns.get(id) ?? null;
+    }
+
+    getDropById(id: string): TimeBasedDrop | null {
+        return this.#drops.get(id) ?? null;
+    }
+
+    getDropCampaignByDropId(id: string): DropCampaign | null {
+        for (const campaign of this.#dropCampaigns.values()) {
+            const timeBasedDrops = campaign.timeBasedDrops;
+            if (timeBasedDrops) {
+                for (const drop of timeBasedDrops) {
+                    if (drop.id === id) {
+                        return campaign;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+}
+
+export declare interface TwitchDropsBot {
+    on(event: "before_drop_campaigns_updated", listener: () => void): this;
+
+    on(event: "pending_drop_campaigns_updated", listener: (campaigns: DropCampaign[]) => void): this;
+
+    on(event: "drop_claimed", listener: (dropId: string) => void): this;
+
+    on(event: "drop_progress_updated", listener: (drop: TimeBasedDrop | null) => void): this;
+
+    on(event: "community_points_earned", listener: (data: any) => void): this;
+
+    on(event: "watch_status_updated", listener: (data: {
+        viewers?: number,
+        uptime?: string,
+        stream_url?: string,
+        watch_time?: number
+    } | null) => void): this;
+
+    on(event: "start_watching_stream", listener: (streamUrl: string) => void): this;
+
+    on(event: "stop_watching_stream", listener: (watchTimeMs: number) => void): this;
+}
+
 export interface TwitchDropsBotOptions {
     gameIds?: string[],
     watchUnlistedGames?: boolean,
@@ -77,7 +147,7 @@ export interface TwitchDropsBotOptions {
     broadcasterIds?: string[]
 }
 
-export class TwitchDropsBot {
+export class TwitchDropsBot extends EventEmitter {
 
     /**
      * A list of game IDs to watch and claim drops for. This list is in order of priority.
@@ -181,8 +251,12 @@ export class TwitchDropsBot {
             return 0;
         }
 
-        const campaignA = this.#getDropCampaignById(a);
-        const campaignB = this.#getDropCampaignById(b);
+        const campaignA = this.#database.getDropCampaignById(a);
+        const campaignB = this.#database.getDropCampaignById(b);
+        if (!(campaignA && campaignB)) {
+            // todo: this never happens
+            return 0;
+        }
 
         // Sort campaigns based on order of game IDs specified in config
         const indexA = this.#gameIds.indexOf(campaignA.game.id);
@@ -203,15 +277,7 @@ export class TwitchDropsBot {
     });
     #pendingDropCampaignIdsNotifier = new WaitNotify();
 
-    /**
-     * A mapping of Drop Campaign IDs to Drop Campaigns. This "database" stores the latest information on each Drop Campaign.
-     * @private
-     */
-    readonly #dropCampaignMap: { [key: string]: DropCampaign } = {};
-
-    #progressBar: any = null;
-    #payload: any = null;
-    #isFirstOutput: boolean = true;
+    readonly #database: Database = new Database();
 
     #currentDropCampaignId: string | null = null;
 
@@ -262,28 +328,71 @@ export class TwitchDropsBot {
      */
     readonly #completedDropIds: Set<string> = new Set<string>();
 
-    constructor(page: Page, client: Client, options?: TwitchDropsBotOptions) {
+    static async create(browser: Browser, cookies: any, options?: TwitchDropsBotOptions): Promise<TwitchDropsBot> {
+        // Get some data from the cookies
+        let oauthToken: string | undefined = undefined;
+        let channelLogin: string | undefined = undefined;
+        for (const cookie of cookies) {
+            switch (cookie['name']) {
+                case 'auth-token':  // OAuth token
+                    oauthToken = cookie['value'];
+                    break;
+
+                case 'persistent':  // "channelLogin" Used for "DropCampaignDetails" operation
+                    channelLogin = cookie['value'].split('%3A')[0];
+                    break;
+            }
+        }
+
+        if (!oauthToken || !channelLogin) {
+            throw new Error("Invalid cookies!");
+        }
+
+        // Seems to be the default hard-coded client ID
+        // Found in sources / static.twitchcdn.net / assets / minimal-cc607a041bc4ae8d6723.js
+        const client = new Client('kimne78kx3ncx6brgo4mv6wki5h1ko', oauthToken, channelLogin);
+
+        const page = await browser.newPage();
+        await page.setCookie(...cookies);
+
+        return new TwitchDropsBot(page, client, options);
+    }
+
+    private constructor(page: Page, client: Client, options?: TwitchDropsBotOptions) {
+        super();
         this.#page = page;
         this.#twitchClient = client;
 
-        // Intercept logging messages to stop/start the progress bar
-        const onBeforeLogMessage = () => {
-            this.#stopProgressBar();
-        }
-        const onAfterLogMessage = () => {
-            this.#startProgressBar();
-        }
-        for (const level of Object.keys(logger.levels)) {
-            // @ts-ignore
-            const og = logger[level];
-
-            // @ts-ignore
-            logger[level] = (args: any) => {
-                onBeforeLogMessage();
-                const result = og(args);
-                onAfterLogMessage();
-                return result;
+        const getDropCampaigns = this.#twitchClient.getDropCampaigns.bind(this.#twitchClient);
+        this.#twitchClient.getDropCampaigns = async () => {
+            const campaigns = await getDropCampaigns();
+            for (const campaign of campaigns) {
+                this.#database.addOrUpdateDropCampaign(campaign);
             }
+            return campaigns;
+        }
+        const getDropCampaignDetails = this.#twitchClient.getDropCampaignDetails.bind(this.#twitchClient);
+        this.#twitchClient.getDropCampaignDetails = async (dropId: string) => {
+            const details = await getDropCampaignDetails(dropId);
+            this.#database.addOrUpdateDropCampaign(details);
+            return details;
+        }
+        const getInventory = this.#twitchClient.getInventory.bind(this.#twitchClient);
+        this.#twitchClient.getInventory = async () => {
+            const inventory = await getInventory();
+            const campaignsInProgress = inventory.dropCampaignsInProgress;
+            if (campaignsInProgress) {
+                for (const campaign of campaignsInProgress) {
+                    this.#database.addOrUpdateDropCampaign(campaign);
+                    const timeBasedDrops = campaign.timeBasedDrops;
+                    if (timeBasedDrops) {
+                        for (const drop of timeBasedDrops) {
+                            this.#database.addOrUpdateDrop(drop);
+                        }
+                    }
+                }
+            }
+            return inventory;
         }
 
         options?.gameIds?.forEach((id => {
@@ -313,6 +422,7 @@ export class TwitchDropsBot {
         this.#twitchDropsWatchdog = new TwitchDropsWatchdog(this.#twitchClient, this.#dropCampaignPollingInterval);
         this.#twitchDropsWatchdog.on('before_update', () => {
             logger.debug('Updating drop campaigns...');
+            this.emit("before_drop_campaigns_updated");
         });
         this.#twitchDropsWatchdog.on('error', (error) => {
             logger.debug("Error checking twitch drops: " + error);
@@ -322,14 +432,28 @@ export class TwitchDropsBot {
             logger.debug('Found ' + campaigns.length + ' campaigns.');
 
             // Claim any Drops that are ready to be claimed
-            const inventory = await this.#twitchClient.getInventory();  //todo: track inventory changes?
-            const dropCampaignsInProgress = inventory.dropCampaignsInProgress;
-            if (dropCampaignsInProgress != null) {
-                for (const campaign of dropCampaignsInProgress) {
-                    //todo: consider event based drops!
-                    for (const drop of campaign.timeBasedDrops) {
-                        if (isDropReadyToClaim(drop)) {
-                            await this.#claimDropReward(drop);
+            let inventory = null;
+            try {
+                inventory = await this.#twitchClient.getInventory();  //todo: track inventory changes?
+            } catch (error) {
+                logger.error("Failed to get inventory");
+                logger.debug(error);
+            }
+            if (inventory) {
+                const dropCampaignsInProgress = inventory.dropCampaignsInProgress;
+                if (dropCampaignsInProgress != null) {
+                    for (const campaign of dropCampaignsInProgress) {
+                        //todo: consider event based drops!
+                        for (const drop of campaign.timeBasedDrops) {
+                            if (isDropReadyToClaim(drop)) {
+                                try {
+                                    await this.#claimDropReward(drop);
+                                } catch (error) {
+                                    logger.error("Failed to claim drop reward");
+                                    logger.debug(error);
+                                    logger.debug(JSON.stringify(drop, null, 4));
+                                }
+                            }
                         }
                     }
                 }
@@ -344,35 +468,7 @@ export class TwitchDropsBot {
 
                 // Add Drop campaign to database (updating it if it already existed)
                 const dropCampaignId = campaign.id;
-                if (dropCampaignId in this.#dropCampaignMap) {
-                    // Check if the campaign data changed
-                    const oldCampaign = this.#dropCampaignMap[dropCampaignId];
-                    const difference: any = detailedDiff(oldCampaign, campaign);
-                    const added = difference["added"];
-                    const deleted = difference["deleted"];
-                    const updated = difference["updated"];
-                    if (Object.keys(added).length > 0 || Object.keys(deleted).length > 0 || Object.keys(updated).length > 0) {
-                        while (true) {
-
-                            // Check if status changed
-                            const updatedStatus = updated["status"];
-                            if (updatedStatus) {
-                                logger.debug("status changed: " + campaign.id + " from " + oldCampaign.status + " to " + updatedStatus);
-
-                                // Check if this was the only thing that changed
-                                if (Object.keys(added).length == 0 && Object.keys(deleted).length == 0 && Object.keys(updated).length == 1) {
-                                    break;
-                                }
-                            }
-
-                            logger.debug("Campaign data changed: " + JSON.stringify(oldCampaign, null, 4));
-                            logger.debug("Campaign data changed: " + JSON.stringify(difference, null, 4));
-                            //todo: check if the drops changed. this is from getcampaigndetails?
-                            break;
-                        }
-                    }
-                }
-                this.#dropCampaignMap[dropCampaignId] = campaign;
+                this.#database.addOrUpdateDropCampaign(campaign);
 
                 // Add Drops campaigns to the pending campaign queue
                 if (this.#gameIds.length === 0 || this.#gameIds.includes(campaign.game.id) || this.#watchUnlistedGames) {
@@ -395,11 +491,19 @@ export class TwitchDropsBot {
                     }
 
                     // Check if we already completed this campaign
-                    const dropCampaignDetails = await this.#twitchClient.getDropCampaignDetails(dropCampaignId);
-                    if (this.#isCampaignCompleted(dropCampaignDetails, inventory)) {
-                        logger.info("campaign already completed: " + this.#getDropCampaignFullName(dropCampaignId));
-                        this.#completedDropCampaignIds.push(dropCampaignId);
-                        continue;
+                    let dropCampaignDetails = null;
+                    try {
+                        dropCampaignDetails = await this.#twitchClient.getDropCampaignDetails(dropCampaignId);
+                    } catch (error) {
+                        logger.error("Failed to get drop campaign details");
+                        logger.debug(error);
+                    }
+                    if (dropCampaignDetails && inventory) {
+                        if (this.#isCampaignCompleted(dropCampaignDetails, inventory)) {
+                            logger.info("campaign already completed: " + this.#getDropCampaignFullName(dropCampaignId));
+                            this.#completedDropCampaignIds.push(dropCampaignId);
+                            continue;
+                        }
                     }
 
                     // We haven't finished this campaign yet, add it to the pending campaigns queue
@@ -407,6 +511,10 @@ export class TwitchDropsBot {
                 }
             }
             logger.debug('Found ' + this.#pendingDropCampaignIds.length + ' pending campaigns.');
+
+            this.emit('pending_drop_campaigns_updated', this.#pendingDropCampaignIds.map((item: string) => {
+                return this.#database.getDropCampaignById(item);
+            }));
 
             // Check if we are currently working on a drop campaign
             if (this.#currentDropCampaignId !== null) {
@@ -446,13 +554,28 @@ export class TwitchDropsBot {
         return true;
     }
 
+    #arePreconditionDropsClaimed(drop: TimeBasedDrop, inventory: Inventory): boolean {
+        const preconditionDrops = drop.preconditionDrops;
+        if (preconditionDrops) {
+            for (const d of preconditionDrops) {
+                const preconditionDrop = getInventoryDrop(d.id, inventory);
+                if (preconditionDrop) {
+                    if (!preconditionDrop.self.isClaimed) {
+                        return false;
+                    }
+                } else {
+                    logger.warn("unknown precondition drop: " + d.id);
+                }
+            }
+        }
+        return true;
+    }
+
     /**
      * Get the first unclaimed {@link TimeBasedDrop} from the specified {@link DropCampaign}.
-     * @param campaignId
      * @param dropCampaignDetails
-     * @param inventory
      */
-    #getFirstUnclaimedDrop(campaignId: string, dropCampaignDetails: DropCampaign, inventory: Inventory): TimeBasedDrop | null {
+    #getFirstUnclaimedDrop(dropCampaignDetails: DropCampaign, inventory: Inventory): TimeBasedDrop | null {
         // TODO: Not all campaigns have time based drops
         for (const drop of dropCampaignDetails.timeBasedDrops) {
 
@@ -471,6 +594,11 @@ export class TwitchDropsBot {
                 continue;
             }
 
+            if (!this.#arePreconditionDropsClaimed(drop, inventory)) {
+                logger.debug("precondition drop not claimed");
+                continue;
+            }
+
             return drop;
         }
 
@@ -484,7 +612,11 @@ export class TwitchDropsBot {
     async #hasPendingHigherPriorityStream(): Promise<boolean> {
         for (const dropCampaignId of this.#pendingDropCampaignIds) {
 
-            const campaign = this.#dropCampaignMap[dropCampaignId];
+            const campaign = this.#database.getDropCampaignById(dropCampaignId);
+            if (!campaign) {
+                //todo: fatal error
+                continue;
+            }
 
             // Check if we are currently watching this campaign
             if (dropCampaignId === this.#currentDropCampaignId) {
@@ -504,31 +636,34 @@ export class TwitchDropsBot {
                 continue;
             }
 
-            let inventory = null;
-            try {
-                inventory = await this.#twitchClient.getInventory();
-            } catch (error) {
-                logger.debug("Failed to get inventory: " + error);
-                continue;
-            }
-
             let details = null;
             try {
                 details = await this.#twitchClient.getDropCampaignDetails(dropCampaignId);
             } catch (error) {
-                logger.debug("Failed to get campaign details: " + error);
+                logger.error("Failed to get campaign details");
+                logger.debug(error);
+                continue;
+            }
+
+            let inventory = null;
+            try {
+                inventory = await this.#twitchClient.getInventory();
+            } catch (error) {
+                logger.error("Failed to get inventory");
+                logger.debug(error);
                 continue;
             }
 
             // Find the first drop that we haven't claimed yet
-            const firstUnclaimedDrop = this.#getFirstUnclaimedDrop(dropCampaignId, details, inventory);
+            const firstUnclaimedDrop = this.#getFirstUnclaimedDrop(details, inventory);
             if (firstUnclaimedDrop === null) {
                 continue;
             }
 
             // Claim the drop if it is ready to be claimed
-            const inventoryDrop = getInventoryDrop(firstUnclaimedDrop.id, inventory, dropCampaignId);
+            /*const inventoryDrop = getInventoryDrop(firstUnclaimedDrop.id, inventory, dropCampaignId);
             if (inventoryDrop !== null) {
+                this.#inventoryDropMap[firstUnclaimedDrop.id] = inventoryDrop;
                 if (isDropReadyToClaim(inventoryDrop)) {
                     try {
                         await this.#claimDropReward(inventoryDrop);
@@ -538,7 +673,7 @@ export class TwitchDropsBot {
                     }
                     continue;
                 }
-            }
+            }*/
 
             // Check if there are active streams
             try {
@@ -554,7 +689,8 @@ export class TwitchDropsBot {
                 }
 
             } catch (error) {
-                logger.debug("Failed to check stream count: " + error);
+                logger.error("Failed to check stream count");
+                logger.debug(error);
             }
 
             logger.info('Higher priority campaign found: ' + this.#getDropCampaignFullName(dropCampaignId) + ' id: ' + dropCampaignId);
@@ -572,7 +708,11 @@ export class TwitchDropsBot {
     #getNextPendingDropCampaignId(): string | null {
         for (const dropCampaignId of this.#pendingDropCampaignIds) {
 
-            const campaign = this.#dropCampaignMap[dropCampaignId];
+            const campaign = this.#database.getDropCampaignById(dropCampaignId);
+            if (!campaign) {
+                //todo: fatal error
+                continue;
+            }
 
             // Check if this drop campaign is active
             if (campaign.status !== 'ACTIVE') {
@@ -623,7 +763,12 @@ export class TwitchDropsBot {
 
         // Check pending Drop Campaigns' games
         for (const dropCampaignId of this.#pendingDropCampaignIds) {
-            const streams = await this.#twitchClient.getActiveStreams(this.#dropCampaignMap[dropCampaignId].game.displayName);
+            const campaign = this.#database.getDropCampaignById(dropCampaignId);
+            if (!campaign) {
+                //todo: fatal error
+                continue;
+            }
+            const streams = await this.#twitchClient.getActiveStreams(campaign.game.displayName);
             if (streams.length > 0) {
                 const streamUrl = streams[0].url;
                 if (this.#streamUrlTemporaryBlacklist.has(streamUrl)) {
@@ -704,7 +849,13 @@ export class TwitchDropsBot {
                             this.#pendingHighPriority = true;
                         } else {
                             // Check if a more preferred broadcaster is online
-                            const preferredBroadcasterStreamUrl = await this.#getNextPreferredBroadcasterStreamUrl();
+                            let preferredBroadcasterStreamUrl = null;
+                            try {
+                                preferredBroadcasterStreamUrl = await this.#getNextPreferredBroadcasterStreamUrl();
+                            } catch (error) {
+                                logger.error("Failed to get next preferred broadcaster stream url");
+                                logger.debug(error);
+                            }
                             if (preferredBroadcasterStreamUrl !== null) {
                                 if (preferredBroadcasterStreamUrl !== streamUrl) {
                                     this.#pendingHighPriority = true;
@@ -757,7 +908,7 @@ export class TwitchDropsBot {
                         // Ignore
                     } else {
                         logger.error("Error processing campaign");
-                        logger.error(error);
+                        logger.debug(error);
                     }
                 } finally {
                     this.#currentDropCampaignId = null;
@@ -770,6 +921,8 @@ export class TwitchDropsBot {
         // TODO: Implement this
     }*/
 
+    #currentDropCampaignDetails: DropCampaign | null = null;
+
     /**
      * Attempt to make progress towards the specified drop campaign.
      * @param dropCampaignId
@@ -781,7 +934,10 @@ export class TwitchDropsBot {
         logger.info('Processing campaign: ' + this.#getDropCampaignFullName(dropCampaignId));
         this.#lastDropCampaignAttemptTimes[dropCampaignId] = new Date().getTime();
 
-        const campaign = this.#dropCampaignMap[dropCampaignId];
+        const campaign = this.#database.getDropCampaignById(dropCampaignId);
+        if (!campaign) {
+            throw new Error("missing campaign");
+        }
 
         // Warn the user if the Twitch account is not linked. Users can still earn progress and claim
         // rewards from campaigns that are not linked to their Twitch account (they will still show up
@@ -793,12 +949,21 @@ export class TwitchDropsBot {
         }
 
         const details = await this.#twitchClient.getDropCampaignDetails(dropCampaignId);
+        this.#currentDropCampaignDetails = details;
+        this.#database.addOrUpdateDropCampaign(details);
+
+        logger.debug('working on campaign ' + JSON.stringify(campaign, null, 4));
+
+        // Reset failed stream counts
+        for (const streamUrl of Object.getOwnPropertyNames(this.#failedStreamUrlCounts)) {
+            delete this.#failedStreamUrlCounts[streamUrl];
+        }
 
         while (true) {
 
             const inventory = await this.#twitchClient.getInventory();
 
-            const drop = this.#getFirstUnclaimedDrop(dropCampaignId, details, inventory);
+            const drop = this.#getFirstUnclaimedDrop(details, inventory);
             if (drop === null) {
                 logger.info('no active drops');
                 break;
@@ -810,8 +975,9 @@ export class TwitchDropsBot {
             // Check if this drop is ready to be claimed
             const inventoryDrop = getInventoryDrop(drop.id, inventory, dropCampaignId);
             if (inventoryDrop != null) {
+                this.#database.addOrUpdateDrop(inventoryDrop);
                 currentMinutesWatched = inventoryDrop.self.currentMinutesWatched;
-                if (currentMinutesWatched >= inventoryDrop.requiredMinutesWatched) {
+                if (isDropReadyToClaim(inventoryDrop)) {
                     await this.#claimDropReward(inventoryDrop);
                     continue;
                 }
@@ -825,11 +991,6 @@ export class TwitchDropsBot {
                     logger.warn('impossible drop! remaining campaign time (minutes): ' + remainingDropActiveTimeMinutes + ' required watch time (minutes): ' + remainingWatchTimeMinutes);
                     break;
                 }
-            }
-
-            // Reset failed stream counts
-            for (const streamUrl of Object.getOwnPropertyNames(this.#failedStreamUrlCounts)) {
-                delete this.#failedStreamUrlCounts[streamUrl];
             }
 
             const getStreamToWatch = async () => {
@@ -904,50 +1065,46 @@ export class TwitchDropsBot {
                 return streams[0].url;
             }
 
-            while (true) {
+            const streamUrl = await getStreamToWatch();
 
-                const streamUrl = await getStreamToWatch();
+            if (streamUrl === null) {
+                throw new NoStreamsError();
+            }
 
-                if (streamUrl === null) {
-                    throw new NoStreamsError();
+            if (!(await this.#hasDropsAvailable(streamUrl, dropCampaignId))) {
+                logger.warn("This stream has no available Drops. This is likely because you already completed this campaign");
+                return;
+            }
+
+            const dropProgressComponent = new DropProgressComponent({targetDrop: drop});
+
+            const components: Component[] = [
+                dropProgressComponent,
+                new CommunityPointsComponent()
+            ]
+
+            // Watch first stream
+            logger.info('Watching stream: ' + streamUrl);
+            try {
+                await this.#watchStreamWrapper(streamUrl, components);
+                //todo: update campaign info when we claim a drop
+            } catch (error) {
+                if (error instanceof NoProgressError) {
+                    logger.warn(error.message);
+                } else if (error instanceof HighPriorityError) {
+                    throw error;
                 }
-
-                if (!(await this.#hasDropsAvailable(streamUrl, dropCampaignId))) {
-                    logger.warn("This stream has no available Drops. This is likely because you already completed this campaign");
-                    return;
-                }
-
-                const dropProgressComponent = new DropProgressComponent({targetDrop: drop});
-
-                const components: Component[] = [
-                    dropProgressComponent,
-                    new CommunityPointsComponent()
-                ]
-
-                // Watch first stream
-                logger.info('Watching stream: ' + streamUrl);
-                try {
-                    await this.#watchStreamWrapper(streamUrl, components);
-                } catch (error) {
-                    if (error instanceof NoProgressError) {
-                        logger.warn(error.message);
-                    } else if (error instanceof HighPriorityError) {
-                        throw error;
-                    }
-                    continue;
-                }
-
-                break;
             }
         }
     }
 
     #onDropRewardClaimed(drop: TimeBasedDrop) {
-        logger.info(ansiEscape("32m") + "Claimed drop: " + getDropName(drop) + ansiEscape("39m"));
-        this.#completedDropIds.add(drop.id);
+        //this.#completedDropIds.add(drop.id); cant do this - need to make sure claim count = entitlement limit
+        this.emit("drop_claimed", drop.id);
     }
 
     async #claimDropReward(drop: TimeBasedDrop) {
+        logger.debug("claimDropReward: " + JSON.stringify(drop, null, 4));
         await this.#twitchClient.claimDropReward(drop.self.dropInstanceID);
         this.#onDropRewardClaimed(drop);
         //todo: check if campaign is completed
@@ -1008,42 +1165,6 @@ export class TwitchDropsBot {
         }
     }
 
-    #isProgressBarStarted: boolean = false;
-
-    #startProgressBar(p = this.#payload) {
-        this.#payload = p;
-        if (!this.#isProgressBarStarted && this.#progressBar !== null) {
-            this.#isProgressBarStarted = true;
-            this.#isFirstOutput = true;
-            for (let i = 0; i < this.#progressBarHeight; ++i) {
-                process.stdout.write('\n');
-            }
-            process.stdout.write(ansiEscape(`${this.#progressBarHeight}A`));
-            this.#progressBar.start(1, 0, p);
-        }
-    }
-
-    #updateProgressBar(p = this.#payload) {
-        this.#payload = p;
-        if (this.#progressBar !== null) {
-            this.#progressBar.update(0, p);
-        }
-    }
-
-    #stopProgressBar(clear: boolean = false) {
-        if (this.#isProgressBarStarted) {
-            this.#isProgressBarStarted = false;
-            this.#progressBar.stop();
-            process.stdout.write(ansiEscape(`${this.#progressBarHeight - 1}B`) + ansiEscape("2K") + ansiEscape(`${this.#progressBarHeight - 1}A`));
-        }
-        if (clear) {
-            this.#progressBar = null;
-            this.#payload = null;
-        }
-    }
-
-    #progressBarHeight: number = 2;
-
     async #watchStreamWrapper(streamUrl: string, components: Component[]) {
 
         const getComponent = <T extends Component>(c: Class<T>): T | null => {
@@ -1062,13 +1183,13 @@ export class TwitchDropsBot {
                 this.#onDropRewardClaimed(drop);
             });
             dropProgressComponent.on('drop-data-changed', () => {
-                this.#stopProgressBar();
-                this.#startProgressBar();
+                this.emit("drop_progress_updated", dropProgressComponent.currentDrop);
             });
         }
 
         const startWatchTime = new Date().getTime();
         try {
+            this.emit("start_watching_stream", streamUrl);
             await this.#watchStream(streamUrl, components);
         } catch (error) {
             if (error instanceof HighPriorityError) {
@@ -1086,7 +1207,7 @@ export class TwitchDropsBot {
                 // Ignore
             } else {
                 logger.error("Error watching stream");
-                logger.error(error);
+                logger.debug(error);
                 if (process.env.SAVE_ERROR_SCREENSHOTS?.toLowerCase() === 'true') {
                     await utils.saveScreenshotAndHtml(this.#page, 'error');
                 }
@@ -1106,7 +1227,7 @@ export class TwitchDropsBot {
             // Re-throw the error
             throw error;
         } finally {
-            logger.info(ansiEscape("36m") + "Watched stream for " + Math.floor((new Date().getTime() - startWatchTime) / 1000 / 60) + " minutes" + ansiEscape("39m"));
+            this.emit("stop_watching_stream", new Date().getTime() - startWatchTime);
         }
     }
 
@@ -1116,11 +1237,11 @@ export class TwitchDropsBot {
         const webSocketListener = new WebSocketListener();
 
         // Set up web socket listener
-        webSocketListener.on('viewcount', count => {
-            this.#viewerCount = count;
-        });
         webSocketListener.on('stream-down', message => {
             this.#isStreamDown = true;
+        });
+        webSocketListener.on("points-earned", data => {
+            this.emit("community_points_earned", data);
         });
 
         // Wrap everything in a try/finally block so that we can detach the web socket listener at the end
@@ -1149,6 +1270,8 @@ export class TwitchDropsBot {
                 }
                 throw error;
             }
+
+            const startWatchTime = new Date().getTime();
 
             try {
                 // Click "Accept mature content" button
@@ -1189,39 +1312,9 @@ export class TwitchDropsBot {
             // Wrap everything in a try/finally block so that we can stop the progress bar at the end
             try {
 
-                // Create progress bar
-                this.#progressBar = new cliProgress.SingleBar(
-                    {
-                        barsize: 20,
-                        clearOnComplete: true,
-                        stream: process.stdout,
-                        format: (options: any, params: any, payload: any) => {
-                            let result = 'Watching ' + payload['stream_url'] + ` | Viewers: ${payload['viewers']} | Uptime: ${payload['uptime']}` + ansiEscape('0K') + '\n';
-
-                            const dropProgressComponent = getComponent(DropProgressComponent);
-                            if (dropProgressComponent !== null && dropProgressComponent.currentDrop !== null) {
-                                const drop = dropProgressComponent.currentDrop;
-                                this.#progressBar.setTotal(drop.requiredMinutesWatched);
-                                result += `${getDropName(drop)} ${BarFormat((dropProgressComponent.currentMinutesWatched ?? 0) / drop.requiredMinutesWatched, options)} ${dropProgressComponent.currentMinutesWatched ?? 0} / ${drop.requiredMinutesWatched} minutes` + ansiEscape('0K') + '\n';
-                            } else {
-                                result += `- No Drops Active -\n`;
-                            }
-
-                            if (this.#isFirstOutput) {
-                                return result;
-                            }
-
-                            return ansiEscape(`${this.#progressBarHeight}A`) + result;
-                        }
-                    },
-                    cliProgress.Presets.shades_classic
-                );
-                this.#progressBar.on('redraw-post', () => {
-                    this.#isFirstOutput = false;
+                this.emit("watch_status_updated", {
+                    stream_url: streamUrl
                 });
-
-                this.#viewerCount = await streamPage.getViewersCount();
-                this.#startProgressBar({'viewers': this.#viewerCount, 'uptime': await streamPage.getUptime(), stream_url: streamUrl});
 
                 // Main loop
                 while (true) {
@@ -1251,26 +1344,47 @@ export class TwitchDropsBot {
                         }
                     }
 
-                    this.#updateProgressBar({
+                    this.#viewerCount = await streamPage.getViewersCount();
+                    this.emit("watch_status_updated", {
                         'viewers': this.#viewerCount,
                         'uptime': await streamPage.getUptime(),
-                        stream_url: streamUrl
+                        stream_url: streamUrl,
+                        watch_time: new Date().getTime() - startWatchTime
                     });
+
+                    const fakeDrop = getComponent(DropProgressComponent)?.currentDrop;
+                    if (fakeDrop) {
+                        const fd = {
+                            ...fakeDrop,
+                            campaign: this.#currentDropCampaignDetails,
+                            self: {
+                                currentMinutesWatched: getComponent(DropProgressComponent)?.currentMinutesWatched
+                            }
+                        }
+                        this.emit("drop_progress_updated", fd);
+                    } else {
+                        this.emit("drop_progress_updated", null);
+                    }
 
                     await this.#page.waitForTimeout(1000);
                 }
             } finally {
-                this.#stopProgressBar(true);
+                this.emit("watch_status_updated", null);
+                this.emit("drop_progress_updated", null);
             }
         } finally {
             await webSocketListener.detach();
         }
     }
 
-    async #getActiveStreams(campaignId: string, details: DropCampaign) {
+    async #getActiveStreams(campaignId: string, details: DropCampaign) { // todo: why we have id and details???
         // Get a list of active streams that have drops enabled
         // todo: this only returns 30 streams. if they all get filtered out by the "allow" filter then we should check for more
-        let streams = await this.#twitchClient.getActiveStreams(this.#getDropCampaignById(campaignId).game.displayName, {tags: [StreamTag.DROPS_ENABLED]});
+        const campaign = this.#database.getDropCampaignById(campaignId);
+        if (!campaign) {
+            throw new Error("missing campaign");
+        }
+        let streams = await this.#twitchClient.getActiveStreams(campaign.game.displayName, {tags: [StreamTag.DROPS_ENABLED]});
 
         // Filter out streams that are not in the allowed channels list, if any
         if (details.allow.isEnabled) {
@@ -1290,11 +1404,14 @@ export class TwitchDropsBot {
     }
 
     #getDropCampaignFullName(campaignId: string) {
-        const campaign = this.#getDropCampaignById(campaignId);
+        const campaign = this.#database.getDropCampaignById(campaignId);
+        if (!campaign) {
+            return "null";
+        }
         return campaign.game.displayName + ' ' + campaign.name;
     }
 
-    #getDropCampaignById(campaignId: string) {
-        return this.#dropCampaignMap[campaignId];
+    getDatabase(): Database {
+        return this.#database;
     }
 }

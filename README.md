@@ -1,6 +1,6 @@
 # Twitch Drops Bot
 
-This is a Node.js bot that uses [Puppeteer](https://github.com/puppeteer/puppeteer) to automatically watch Twitch streams and claim drop rewards.
+A Node.js bot that uses [Puppeteer](https://github.com/puppeteer/puppeteer) to automatically watch Twitch streams and claim drop rewards.
 
 ## Getting Started
 
@@ -8,27 +8,39 @@ The recommended way of using this bot is to use [Docker](https://www.docker.com/
 
 ### Docker
 
-Pull the latest image with `docker pull ghcr.io/tychothetaco/twitch-drops-bot:latest`.
+#### Tags
+
+`latest` - The latest development version. This includes all commits from the `dev` branch.
+
+`latest-release` - The latest release version. This includes all commits from the `master` branch.
+
+`vX.X.X` - Specific release versions.
+
+#### Pull the image
+
+Pull the latest release image with `docker pull ghcr.io/tychothetaco/twitch-drops-bot:latest-release`.
 
 #### Starting the container
 
 Use one of the following commands to start the container. Make sure you run this command in the same directory as `config.json`, since it will map the current directory to the `/app/data` directory in the container. If this is the first
 time running the bot, a `config.json` file will be created in the current directory.
 
-Windows (Command Prompt): `docker run -v %cd%:/app/data -i -t --sig-proxy=false ghcr.io/tychothetaco/twitch-drops-bot`
+Windows (Command Prompt): `docker run --rm -v %cd%:/app/data -i -t --sig-proxy=false ghcr.io/tychothetaco/twitch-drops-bot`
 
-Linux: `docker run -v ${PWD}:/app/data -i -t --sig-proxy=false ghcr.io/tychothetaco/twitch-drops-bot`
+Linux: `docker run --rm -v ${PWD}:/app/data -i -t --sig-proxy=false ghcr.io/tychothetaco/twitch-drops-bot`
 
 To detach from the docker session without terminating it, use `CTRL-P` `CTRL-Q`.
 
 ### Non-Docker Setup
 
-1) Install [Node.js](https://nodejs.org/) (Requires version 14+)
+1) Install [Node.js](https://nodejs.org/) (Requires version 16+)
 2) Install [Google Chrome](https://www.google.com/chrome/)
 3) Install this package: `npm install .`
 4) Build the app: `npm run build`
 5) Start the bot with `node dist/index.js` or `npm run start`. If there is no configuration file, a default one will be created.
 6) By default, the bot will attempt to watch all games. You can change which games that the bot watches by specifying game IDs in the config file. See `games.csv` for the game IDs.
+
+After updating your install, re-run `npm install .` and `npm run build`.
 
 ### Raspberry Pi
 
@@ -53,7 +65,28 @@ A sample config file looks like this:
     "headless": true,
     "headless_login": false,
     "interval": 15,
-    "browser_args": []
+    "load_timeout_secs": 30,
+    "failed_stream_retry": 3,
+    "failed_stream_timeout": 30,
+    "browser_args": [],
+    "watch_unlisted_games": false,
+    "hide_video": false,
+    "show_account_not_linked_warning": true,
+    "ignored_games": [],
+    "attempt_impossible_campaigns": true,
+    "watch_streams_when_no_drop_campaigns_active": false,
+    "broadcasters": [],
+    "tui": {
+        "enabled": false
+    },
+    "updates": {
+        "type": "release",
+        "enabled": true
+    },
+    "logging": {
+        "enabled": true,
+        "level": "debug"
+    }
 }
 ```
 
@@ -69,7 +102,7 @@ Below is a list of all available options.
 - Alias: `-b`
 - Default: Operating system dependent
 
-`‑‑games <ids>` | `games` A list of IDs of the games that the bot should automatically watch. See `games.csv` for a list of game IDs. If empty or omitted, the bot will try to watch all games. If provided as a command line argument, this should be a comma-separated list of IDs. If provided in the JSON config, this should be an array of strings. This list is in order of priority! The bot will give priority to games that are at the beginning of the list. For example: Your config file has `"games": ["1", "2", "3"]`. The bot is currently watching a stream for game `2`. The bot periodically checks if there are active campaigns/streams for the other games listed, and finds one for game `1`. Game `1` is listed first in the config, so it has a higher priority and the bot will switch to it. If there are multiple active campaigns for a game, then it will give priority to the one that ends first.
+`‑‑games <ids>` | `games` A list of IDs of the games that the bot should automatically watch. See `games.csv` for a list of game IDs (Note that this is not a complete list - this bot supports any games with time based Drops). If empty or omitted, the bot will try to watch all games. If provided as a command line argument, this should be a comma-separated list of IDs. If provided in the JSON config, this should be an array of strings. This list is in order of priority! The bot will give priority to games that are at the beginning of the list. For example: Your config file has `"games": ["1", "2", "3"]`. The bot is currently watching a stream for game `2`. The bot periodically checks if there are active campaigns/streams for the other games listed, and finds one for game `1`. Game `1` is listed first in the config, so it has a higher priority and the bot will switch to it. If there are multiple active campaigns for a game, then it will give priority to the one that ends first.
 
 - Alias: `-g`
 
@@ -103,10 +136,6 @@ Below is a list of all available options.
 `‑‑cookies‑path <path>` | `cookies_path` The path to a file containing Twitch login cookies. If the file does not exist, one will be created after logging in.
 
 - Default: `cookies‑<username>.json`
-
-`‑‑log‑level <level>` | `log_level` The log level to display in the console. All log levels are still logged to the log file. Using a level lower than `info` may cause the progress bar to get messed up.
-
-- Default: `info`
 
 `‑‑show‑account‑not‑linked‑warning` | `show_account_not_linked_warning` Show a warning if your Twitch account is not linked to a Drop Campaign.
 
@@ -142,10 +171,30 @@ Below is a list of all available options.
 
 `‑-broadcasters` | `broadcasters` A list of broadcasters (streamers) usernames that the bot should watch when it is idle (no Drop Campaigns active). This list is in order of priority.
 
-`‑-do-version-check` | `do_version_check` Check for a new version on startup.
+`tui` Changes text-based user interface (TUI) options. This should be in JSON format.
 
-- Default: `true`
+- `enabled`: boolean - When `true`, enables a text-based interface for the bot. NOTE: THIS IS AN EXPERIMENTAL FEATURE.
+
+`updates` Changes update check settings. This should be in JSON format.
+
+- `enabled`: boolean - When `true` (default), the bot will check for updates once per day.
+- `type`: string - Determines which type of update to be notified of.
+  - `"dev"` - Notify about updates for new development versions and release versions of the bot.
+  - `"release"` - (default) Only notify for new release versions of the bot.
+
+`logging` - Change options related to logging. This should be in JSON format.
+- `enabled`: When `true` (default), the app will log data to a file. Note that if you disable logging, it will be very difficult for me to diagnose any issues that you might run into.
+- `file`: Path of the log file (default: `log-XXXXXXXXXX.txt`). If you use this option, the file will be overwritten whenever you restart the app!
+- `level`: The level of logging to write to the log file. One of: `debug` (default), `info`, `warn`, `error`.
 
 ### Update Games List
 
-If you want to update the list of games found in `games.csv`, just run `npm run updateGames`.
+If you want to update the list of games found in `games.csv`, just run `npm run updateGames` or `npm run u`.
+
+## Troubleshooting
+
+`Error watching stream`
+
+When this happens, its usually because the stream page did not load fast enough. It's normal for this to happen occasionally, but if it happens often, it might be due to a slow or unstable network connection. This can also happen if you're using a low-power system such as a Raspberry Pi.
+
+Try increasing `load_timeout_secs` to `60` or `90`.  

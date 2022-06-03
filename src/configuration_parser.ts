@@ -2,10 +2,10 @@
 
 import fs from 'fs';
 
-const {ArgumentParser} = require('argparse');
+import {ArgumentParser} from 'argparse';
 
-import logger from './logger';
-import {Option, StringListOption} from "./options";
+import logger from './logger.js';
+import {Option, StringListOption} from "./options.js";
 
 export class ConfigurationParser {
 
@@ -20,6 +20,7 @@ export class ConfigurationParser {
     parse(): object {
 
         // todo: add a validation/transform step
+        // todo: parse json like: setting.sub_setting=x
 
         // Parse arguments
         const parser = new ArgumentParser();
