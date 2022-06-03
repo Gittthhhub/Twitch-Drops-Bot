@@ -293,6 +293,7 @@ const options = [
     new BooleanOption('--watch-unlisted-games'),
     new BooleanOption('--hide-video'),
     new StringOption('--cookies-path'),
+    new StringOption('--proxy'),
     new StringOption('--log-level'),
     new BooleanOption('--show-account-not-linked-warning', false, {defaultValue: true, alias: '-sanlw'}),
     new StringListOption("--ignored-games"),
@@ -340,6 +341,7 @@ export interface Config {
     watch_unlisted_games: boolean,
     hide_video: boolean,
     cookies_path: string,
+    proxy: string,
     show_account_not_linked_warning: boolean,
     ignored_games: string[],
     attempt_impossible_campaigns: boolean,
@@ -547,7 +549,7 @@ async function main() {
         logger.info('Saved cookies to ' + cookiesPath);
     }
 
-    const bot = await TwitchDropsBot.create(browser, cookies, {
+    const bot = await TwitchDropsBot.create(browser, cookies, config['proxy'], {
         gameIds: config['games'],
         failedStreamBlacklistTimeout: config['failed_stream_timeout'],
         failedStreamRetryCount: config['failed_stream_retry'],

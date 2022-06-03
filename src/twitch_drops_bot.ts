@@ -328,7 +328,7 @@ export class TwitchDropsBot extends EventEmitter {
      */
     readonly #completedDropIds: Set<string> = new Set<string>();
 
-    static async create(browser: Browser, cookies: any, options?: TwitchDropsBotOptions): Promise<TwitchDropsBot> {
+    static async create(browser: Browser, cookies: any, proxy: string, options?: TwitchDropsBotOptions): Promise<TwitchDropsBot> {
         // Get some data from the cookies
         let oauthToken: string | undefined = undefined;
         let channelLogin: string | undefined = undefined;
@@ -350,7 +350,7 @@ export class TwitchDropsBot extends EventEmitter {
 
         // Seems to be the default hard-coded client ID
         // Found in sources / static.twitchcdn.net / assets / minimal-cc607a041bc4ae8d6723.js
-        const client = new Client('kimne78kx3ncx6brgo4mv6wki5h1ko', oauthToken, channelLogin);
+        const client = new Client('kimne78kx3ncx6brgo4mv6wki5h1ko', oauthToken, channelLogin, proxy);
 
         const page = await browser.newPage();
         await page.setCookie(...cookies);

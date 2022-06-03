@@ -7,15 +7,8 @@ dnscache({enable: true});
 import axios from "axios";
 
 import logger from "./logger.js";
-const tunnel = require('tunnel');
-const tunnelProxy = tunnel.httpsOverHttp({
-    proxy: {
-        host: '127.0.0.1',
-        port: '1050',
-    },
-});
 
-import logger from "./logger";
+import HttpsProxyAgent from "https-proxy-agent";
 
 export interface StreamData {
     url: string,
@@ -136,11 +129,13 @@ export class Client {
     readonly #clientId: string;
     readonly #oauthToken: string;
     readonly #channelLogin: string;
+    readonly #proxy: string;
 
-    constructor(clientId: string, oauthToken: string, channelLogin: string) {
+    constructor(clientId: string, oauthToken: string, channelLogin: string, proxy: string) {
         this.#clientId = clientId;
         this.#oauthToken = oauthToken;
         this.#channelLogin = channelLogin;
+        this.#proxy = proxy;
     }
 
     /**
@@ -156,7 +151,7 @@ export class Client {
                     "Client-Id": this.#clientId,
                     "Authorization": `OAuth ${this.#oauthToken}`
                 },
-                httpsAgent: tunnelProxy,
+                httpsAgent: this.#proxy === undefined || this.#proxy == "" ? null : HttpsProxyAgent(this.#proxy)
             }
         );
 

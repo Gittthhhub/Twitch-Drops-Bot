@@ -63,6 +63,7 @@ const options = [
     }),
     new BooleanOption('--headless', false, {defaultValue: true}),
     new BooleanOption('--headless-login'),
+    new StringOption('--proxy'),
     new StringListOption('--browser-args'),
     new StringOption('--cookies-path'),
     new StringOption('--log-level')
@@ -197,7 +198,7 @@ if (config['username']) {
 
     // Seems to be the default hard-coded client ID
     // Found in sources / static.twitchcdn.net / assets / minimal-cc607a041bc4ae8d6723.js
-    const twitchClient = new Client('kimne78kx3ncx6brgo4mv6wki5h1ko', oauthToken, channelLogin);
+    const twitchClient = new Client('kimne78kx3ncx6brgo4mv6wki5h1ko', oauthToken, channelLogin, config["proxy"]);
 
     updateGames(await twitchClient.getDropCampaigns());
 
